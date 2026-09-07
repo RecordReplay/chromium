@@ -413,6 +413,9 @@ void AudioInputDevice::AudioThreadCallback::MapSharedMemory() {
     ptr += segment_length_;
   }
 
+  if (recordreplay::IsRecordingOrReplaying())
+    capture_bus_ = media::AudioBus::Create(audio_parameters_);
+
   // Indicate that browser side capture initialization has succeeded and IPC
   // channel initialized. This effectively completes the
   // AudioCapturerSource::Start()' phase as far as the caller of that function
@@ -433,39 +436,34 @@ void AudioInputDevice::AudioThreadCallback::Process(uint32_t pending_data) {
 
   // Use pre-allocated audio bus wrapping existing block of shared memory.
   const media::AudioBus* audio_bus = audio_buses_[current_segment_id_].get();
-  AudioInputBufferParameters params = buffer->params;
+  const AudioInputBufferParameters* params = &buffer->params;
+  AudioInputBufferParameters recorded_params{};
   if (recordreplay::IsRecordingOrReplaying()) {
-    recordreplay::RecordReplayBytes("AudioInputDevice::Process params", &params,
-                                    sizeof(params));
-    if (recordreplay::IsReplaying()) {
-      if (!capture_bus_)
-        capture_bus_ = media::AudioBus::Create(audio_parameters_);
-      for (int ch = 0; ch < capture_bus_->channels(); ++ch) {
-        recordreplay::RecordReplayBytes(
-            "AudioInputDevice::Process", capture_bus_->channel(ch),
-            static_cast<size_t>(capture_bus_->frames()) * sizeof(float));
-      }
-      audio_bus = capture_bus_.get();
-    } else {
-      for (int ch = 0; ch < audio_bus->channels(); ++ch) {
-        recordreplay::RecordReplayBytes(
-            "AudioInputDevice::Process",
-            const_cast<float*>(audio_bus->channel(ch)),
-            static_cast<size_t>(audio_bus->frames()) * sizeof(float));
-      }
+    if (recordreplay::IsRecording()) {
+      audio_bus->CopyTo(capture_bus_.get());
+      recorded_params = buffer->params;
     }
+    recordreplay::RecordReplayBytes("AudioInputDevice::Process params",
+                                    &recorded_params, sizeof(recorded_params));
+    for (int ch = 0; ch < capture_bus_->channels(); ++ch) {
+      recordreplay::RecordReplayBytes(
+          "AudioInputDevice::Process", capture_bus_->channel(ch),
+          static_cast<size_t>(capture_bus_->frames()) * sizeof(float));
+    }
+    audio_bus = capture_bus_.get();
+    params = &recorded_params;
   }
 
   // Usually this will be equal but in the case of low sample rate (e.g. 8kHz,
   // the buffer may be bigger (on mac at least)).
-  DCHECK_GE(params.size,
+  DCHECK_GE(params->size,
             segment_length_ - sizeof(AudioInputBufferParameters));
 
   // Verify correct sequence.
-  if (params.id != last_buffer_id_ + 1) {
+  if (params->id != last_buffer_id_ + 1) {
     std::string message = base::StringPrintf(
         "Incorrect buffer sequence. Expected = %u. Actual = %u.",
-        last_buffer_id_ + 1, params.id);
+        last_buffer_id_ + 1, params->id);
     LOG(ERROR) << message;
     capture_callback_->OnCaptureError(
         media::AudioCapturerSource::ErrorCode::kUnknown, message);
@@ -478,7 +476,7 @@ void AudioInputDevice::AudioThreadCallback::Process(uint32_t pending_data) {
     capture_callback_->OnCaptureError(
         media::AudioCapturerSource::ErrorCode::kUnknown, message);
   }
-  last_buffer_id_ = params.id;
+  last_buffer_id_ = params->id;
 
   // Regularly inform that we have gotten data.
   frames_since_last_got_data_callback_ += audio_bus->frames();
@@ -492,12 +490,12 @@ void AudioInputDevice::AudioThreadCallback::Process(uint32_t pending_data) {
   // the audio delay measurement.
   // TODO(olka, tommi): Take advantage of |capture_time| in the renderer.
   const base::TimeTicks capture_time =
-      base::TimeTicks() + base::Microseconds(params.capture_time_us);
+      base::TimeTicks() + base::Microseconds(params->capture_time_us);
   const base::TimeTicks now_time = base::TimeTicks::Now();
   DCHECK_GE(now_time, capture_time);
 
-  capture_callback_->Capture(audio_bus, capture_time, params.volume,
-                             params.key_pressed);
+  capture_callback_->Capture(audio_bus, capture_time, params->volume,
+                             params->key_pressed);
 
   if (++current_segment_id_ >= total_segments_)
     current_segment_id_ = 0u;
