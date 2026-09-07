@@ -54,7 +54,8 @@ void AudioOutputDeviceThreadCallback::Process(uint32_t control_signal) {
   media::AudioOutputBuffer* buffer =
       reinterpret_cast<media::AudioOutputBuffer*>(
           shared_memory_mapping_.memory());
-  uint32_t frames_skipped = buffer->params.frames_skipped;
+  uint32_t frames_skipped = recordreplay::RecordReplayValue(
+      "audioparams::frames_skipped", buffer->params.frames_skipped);
   buffer->params.frames_skipped = 0;
 
   TRACE_EVENT_BEGIN2("audio", "AudioOutputDevice::FireRenderCallback",
@@ -66,7 +67,8 @@ void AudioOutputDeviceThreadCallback::Process(uint32_t control_signal) {
     recordreplay::RecordReplayValue("audioparams::delay_us", buffer->params.delay_us));
 
   base::TimeTicks delay_timestamp =
-      base::TimeTicks() + base::Microseconds(buffer->params.delay_timestamp_us);
+      base::TimeTicks() + base::Microseconds(recordreplay::RecordReplayValue(
+          "audioparams::delay_timestamp_us", buffer->params.delay_timestamp_us));
 
   DVLOG(4) << __func__ << " delay:" << delay << " delay_timestamp:" << delay
            << " frames_skipped:" << frames_skipped;
