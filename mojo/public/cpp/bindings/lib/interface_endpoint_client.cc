@@ -1035,18 +1035,23 @@ bool InterfaceEndpointClient::HandleValidatedMessage(Message* message) {
   if (message->has_flag(Message::kFlagExpectsResponse)) {
     recordreplay::Assert("[RUN-2229-2231] InterfaceEndpointClient::HandleValidatedMessage B");
     has_response = true;
-    auto responder = std::make_unique<ResponderThunk>(
-        weak_ptr_factory_.GetWeakPtr(), task_runner_);
     if (mojo::internal::ControlMessageHandler::IsControlMessage(message)) {
       recordreplay::Assert(
           "[RUN-2229-2231] InterfaceEndpointClient::HandleValidatedMessage C");
+      auto responder = std::make_unique<ResponderThunk>(
+          weak_ptr_factory_.GetWeakPtr(), task_runner_);
       return control_message_handler_.AcceptWithResponder(message,
                                                           std::move(responder));
+    } else if (record_replay_leaked_) {
+      // Do not build a ResponderThunk: its dtor RaiseError() would reset the
+      // pipe (shared MultiplexRouter) after a leak skip.
+      accepted_interface_message = true;
     } else {
+      auto responder = std::make_unique<ResponderThunk>(
+          weak_ptr_factory_.GetWeakPtr(), task_runner_);
       if (idle_tracking_connection_group_)
         responder->set_connection_group(idle_tracking_connection_group_);
       accepted_interface_message =
-          record_replay_leaked_ ||
           incoming_receiver_->AcceptWithResponder(message, std::move(responder));
     }
   } else if (message->has_flag(Message::kFlagIsResponse)) {
