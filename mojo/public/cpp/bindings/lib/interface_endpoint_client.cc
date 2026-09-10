@@ -1051,8 +1051,8 @@ bool InterfaceEndpointClient::HandleValidatedMessage(Message* message) {
           weak_ptr_factory_.GetWeakPtr(), task_runner_);
       if (idle_tracking_connection_group_)
         responder->set_connection_group(idle_tracking_connection_group_);
-      accepted_interface_message =
-          incoming_receiver_->AcceptWithResponder(message, std::move(responder));
+      accepted_interface_message = incoming_receiver_->AcceptWithResponder(
+          message, std::move(responder));
     }
   } else if (message->has_flag(Message::kFlagIsResponse)) {
     uint64_t request_id = message->request_id();
