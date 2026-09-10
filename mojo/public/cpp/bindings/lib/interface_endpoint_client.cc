@@ -762,12 +762,57 @@ void InterfaceEndpointClient::NotifyError(
   // callback may own this endpoint, so we simply move the responders onto the
   // stack here and let them be destroyed when the stack unwinds.
   AsyncResponderMap responders;
+  size_t async_n;
   {
     base::AutoLock lock(async_responders_lock_);
+    async_n = async_responders_.size();
     std::swap(responders, async_responders_);
   }
 
   control_message_proxy_.OnConnectionError();
+
+  // crash-0100: breadcrumb before possibly-bad handler invoke.
+  {
+    const bool has_eh = !!error_handler_;
+    const bool has_ewrh = !!error_with_reason_handler_;
+    const int branch = has_eh ? 1 : (has_ewrh ? (reason ? 2 : 3) : 0);
+    const void* cb =
+        has_eh ? static_cast<const void*>(&error_handler_)
+               : (has_ewrh ? static_cast<const void*>(&error_with_reason_handler_)
+                           : nullptr);
+    uintptr_t bind_state = 0;
+    uintptr_t invoke = 0;
+    if (cb) {
+      // OnceCallback layout: sole member is CallbackBase::bind_state_.
+      bind_state = *reinterpret_cast<const uintptr_t*>(cb);
+      if (bind_state)
+        invoke = *reinterpret_cast<const uintptr_t*>(bind_state + 8);
+    }
+    const auto& hr = handle_.disconnect_reason();
+    recordreplay::Diagnostic(
+        "[crash-0100] NotifyError this=%d iface=%s "
+        "handle_valid=%d handle_id=%u pending=%d "
+        "arg_reason=%d arg_custom=%u arg_desc=%s "
+        "handle_reason=%d handle_custom=%u handle_desc=%s "
+        "has_eh=%d has_ewrh=%d branch=%d "
+        "bind_state=%p invoke=%p leaked=%d "
+        "next_req=%llu async_n=%zu sync_n=%zu ctrl=%d recv=%d",
+        recordreplay::PointerId(this),
+        interface_name_ ? interface_name_ : "",
+        handle_.is_valid(), handle_.id(), handle_.pending_association(),
+        !!reason, reason ? reason->custom_reason : 0u,
+        reason ? reason->description.c_str() : "",
+        hr.has_value(), hr ? hr->custom_reason : 0u,
+        hr ? hr->description.c_str() : "",
+        has_eh, has_ewrh, branch,
+        reinterpret_cast<void*>(bind_state),
+        reinterpret_cast<void*>(invoke),
+        record_replay_leaked_,
+        static_cast<unsigned long long>(next_request_id_),
+        async_n, sync_responses_.size(),
+        recordreplay::PointerId(controller_),
+        recordreplay::PointerId(incoming_receiver_));
+  }
 
   if (error_handler_) {
     std::move(error_handler_).Run();
