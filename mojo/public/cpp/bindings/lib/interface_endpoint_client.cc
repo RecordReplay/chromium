@@ -894,7 +894,8 @@ bool InterfaceEndpointClient::AcceptNotifyIdle() {
 
   // With no outstanding unacked messages, a NotifyIdle received implies that
   // the peer really is idle. We can invoke our idle handler.
-  idle_handler_.Run();
+  if (!record_replay_leaked_)
+    idle_handler_.Run();
   return true;
 }
 
@@ -1044,8 +1045,9 @@ bool InterfaceEndpointClient::HandleValidatedMessage(Message* message) {
     } else {
       if (idle_tracking_connection_group_)
         responder->set_connection_group(idle_tracking_connection_group_);
-      accepted_interface_message = incoming_receiver_->AcceptWithResponder(
-          message, std::move(responder));
+      accepted_interface_message =
+          record_replay_leaked_ ||
+          incoming_receiver_->AcceptWithResponder(message, std::move(responder));
     }
   } else if (message->has_flag(Message::kFlagIsResponse)) {
     uint64_t request_id = message->request_id();
@@ -1101,7 +1103,8 @@ bool InterfaceEndpointClient::HandleValidatedMessage(Message* message) {
     internal::MessageDispatchContext dispatch_context(message);
     recordreplay::Assert(
         "[RUN-2229-2231] InterfaceEndpointClient::HandleValidatedMessage J");
-    return pending_response->responder->Accept(message);
+    return record_replay_leaked_ ||
+           pending_response->responder->Accept(message);
   } else {
     if (mojo::internal::ControlMessageHandler::IsControlMessage(message)) {
       recordreplay::Assert(
