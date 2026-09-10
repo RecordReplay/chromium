@@ -814,6 +814,10 @@ void InterfaceEndpointClient::NotifyError(
         recordreplay::PointerId(incoming_receiver_));
   }
 
+  // Skip user Callback Invokes on a leaked client (owner already gone).
+  if (record_replay_leaked_)
+    return;
+
   if (error_handler_) {
     std::move(error_handler_).Run();
   } else if (error_with_reason_handler_) {
