@@ -1040,7 +1040,8 @@ bool TryUpdateSha256FromAsciiOneByte(v8::Isolate* isolate,
       if (data[i] >= 0x80)
         return false;
     }
-    hasher->Update(data, len);
+    if (len)
+      hasher->Update(data, len);
     return true;
   }
 
@@ -1090,11 +1091,13 @@ void UpdateSha256FromUtf16ViaChunkedWriteUtf8(v8::Isolate* isolate,
                                              crypto::SecureHash* hasher) {
   const int length = str->Length();
   uint16_t chars[kSha256StringChunkChars];
-  char utf8[kSha256StringChunkChars * 3 + 1];
+  char utf8[kSha256StringChunkChars * 3 + 1];  // max 3 bytes/code unit
   int pos = 0;
   while (pos < length) {
+    v8::HandleScope chunk_scope(isolate);
     int n = std::min(kSha256StringChunkChars, length - pos);
     str->Write(isolate, chars, pos, n, v8::String::NO_NULL_TERMINATION);
+    // Keep surrogate pairs inside one chunk.
     if (n > 0 && pos + n < length && (chars[n - 1] & 0xFC00) == 0xD800)
       --n;
     if (n <= 0) {
@@ -1105,8 +1108,11 @@ void UpdateSha256FromUtf16ViaChunkedWriteUtf8(v8::Isolate* isolate,
         v8::String::NewFromTwoByte(isolate, chars, v8::NewStringType::kNormal,
                                    n)
             .ToLocalChecked();
-    const int nbytes = chunk->WriteUtf8(isolate, utf8, sizeof(utf8), nullptr,
-                                        v8::String::NO_NULL_TERMINATION);
+    int nchars = 0;
+    const int nbytes =
+        chunk->WriteUtf8(isolate, utf8, sizeof(utf8), &nchars,
+                         v8::String::NO_NULL_TERMINATION);
+    CHECK(nchars == n);
     hasher->Update(utf8, nbytes);
     pos += n;
   }
@@ -1130,7 +1136,8 @@ static void SHA256DigestHex(const v8::FunctionCallbackInfo<v8::Value>& args) {
   CHECK(args.Length() == 1 && args[0]->IsString() &&
       "must be called with a single string");
   v8::Isolate* isolate = args.GetIsolate();
-  char* digestHex = new char[65];
+  // Zeroed: replay skips hash and only fills via RecordReplayBytes.
+  char* digestHex = new char[65]();
 
   if (!recordreplay::IsReplaying()) {
     std::unique_ptr<crypto::SecureHash> hasher =
