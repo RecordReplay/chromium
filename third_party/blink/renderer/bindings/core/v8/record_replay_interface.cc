@@ -1022,16 +1022,19 @@ static void SHA256DigestHex(const v8::FunctionCallbackInfo<v8::Value>& args) {
   CHECK(args.Length() == 1 && args[0]->IsString() &&
       "must be called with a single string");
   v8::Isolate* isolate = args.GetIsolate();
-  v8::String::Utf8Value content(isolate, args[0]);
+  // Zeroed: replay skips hash and only fills via RecordReplayBytes.
+  char* digestHex = new char[65]();
 
-  std::unique_ptr<crypto::SecureHash> hasher =
-    crypto::SecureHash::Create(crypto::SecureHash::SHA256);
-  hasher->Update(*content, content.length());
-  uint8_t digest[crypto::kSHA256Length];
-  hasher->Finish(digest, crypto::kSHA256Length);
-  char* digestHex = new char[65];
-  for (int i = 0; i < 32; i++) {
-    sprintf(digestHex + i * 2, "%02x", digest[i]);
+  if (!recordreplay::IsReplaying()) {
+    v8::String::Utf8Value content(isolate, args[0]);
+    std::unique_ptr<crypto::SecureHash> hasher =
+        crypto::SecureHash::Create(crypto::SecureHash::SHA256);
+    hasher->Update(*content, content.length());
+    uint8_t digest[crypto::kSHA256Length];
+    hasher->Finish(digest, crypto::kSHA256Length);
+    for (int i = 0; i < 32; i++) {
+      sprintf(digestHex + i * 2, "%02x", digest[i]);
+    }
   }
 
   // The content being hashed can vary when replaying if source contents have been
