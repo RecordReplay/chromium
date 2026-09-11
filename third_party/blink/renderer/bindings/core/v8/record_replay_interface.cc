@@ -47,6 +47,7 @@
 #include "third_party/inspector_protocol/crdtp/maybe.h"
 #include "v8/include/v8-inspector.h"
 
+#include <algorithm>
 #include <array>
 #include <cinttypes>
 #include <fstream>
@@ -1018,20 +1019,128 @@ static void GetRecordingId(const v8::FunctionCallbackInfo<v8::Value>& args) {
   }
 }
 
+namespace {
+
+constexpr int kSha256StringChunkChars = 8192;
+
+bool TryUpdateSha256FromAsciiOneByte(v8::Isolate* isolate,
+                                     v8::Local<v8::String> str,
+                                     crypto::SecureHash* hasher) {
+  if (!str->ContainsOnlyOneByte())
+    return false;
+
+  const int length = str->Length();
+  if (str->IsExternalOneByte()) {
+    const v8::String::ExternalOneByteStringResource* resource =
+        str->GetExternalOneByteStringResource();
+    const uint8_t* data =
+        reinterpret_cast<const uint8_t*>(resource->data());
+    const size_t len = resource->length();
+    for (size_t i = 0; i < len; ++i) {
+      if (data[i] >= 0x80)
+        return false;
+    }
+    hasher->Update(data, len);
+    return true;
+  }
+
+  uint8_t buf[kSha256StringChunkChars];
+  for (int start = 0; start < length; start += kSha256StringChunkChars) {
+    const int n = std::min(kSha256StringChunkChars, length - start);
+    str->WriteOneByte(isolate, buf, start, n, v8::String::NO_NULL_TERMINATION);
+    for (int i = 0; i < n; ++i) {
+      if (buf[i] >= 0x80)
+        return false;
+    }
+  }
+  for (int start = 0; start < length; start += kSha256StringChunkChars) {
+    const int n = std::min(kSha256StringChunkChars, length - start);
+    str->WriteOneByte(isolate, buf, start, n, v8::String::NO_NULL_TERMINATION);
+    hasher->Update(buf, n);
+  }
+  return true;
+}
+
+void UpdateSha256FromLatin1AsUtf8(v8::Isolate* isolate,
+                                  v8::Local<v8::String> str,
+                                  crypto::SecureHash* hasher) {
+  const int length = str->Length();
+  uint8_t latin1[kSha256StringChunkChars];
+  char utf8[kSha256StringChunkChars * 2];
+  for (int start = 0; start < length; start += kSha256StringChunkChars) {
+    const int n = std::min(kSha256StringChunkChars, length - start);
+    str->WriteOneByte(isolate, latin1, start, n,
+                      v8::String::NO_NULL_TERMINATION);
+    int utf8_len = 0;
+    for (int i = 0; i < n; ++i) {
+      const uint8_t b = latin1[i];
+      if (b < 0x80) {
+        utf8[utf8_len++] = static_cast<char>(b);
+      } else {
+        utf8[utf8_len++] = static_cast<char>(0xC0 | (b >> 6));
+        utf8[utf8_len++] = static_cast<char>(0x80 | (b & 0x3F));
+      }
+    }
+    hasher->Update(utf8, utf8_len);
+  }
+}
+
+void UpdateSha256FromUtf16ViaChunkedWriteUtf8(v8::Isolate* isolate,
+                                             v8::Local<v8::String> str,
+                                             crypto::SecureHash* hasher) {
+  const int length = str->Length();
+  uint16_t chars[kSha256StringChunkChars];
+  char utf8[kSha256StringChunkChars * 3 + 1];
+  int pos = 0;
+  while (pos < length) {
+    int n = std::min(kSha256StringChunkChars, length - pos);
+    str->Write(isolate, chars, pos, n, v8::String::NO_NULL_TERMINATION);
+    if (n > 0 && pos + n < length && (chars[n - 1] & 0xFC00) == 0xD800)
+      --n;
+    if (n <= 0) {
+      n = std::min(2, length - pos);
+      str->Write(isolate, chars, pos, n, v8::String::NO_NULL_TERMINATION);
+    }
+    v8::Local<v8::String> chunk =
+        v8::String::NewFromTwoByte(isolate, chars, v8::NewStringType::kNormal,
+                                   n)
+            .ToLocalChecked();
+    const int nbytes = chunk->WriteUtf8(isolate, utf8, sizeof(utf8), nullptr,
+                                        v8::String::NO_NULL_TERMINATION);
+    hasher->Update(utf8, nbytes);
+    pos += n;
+  }
+}
+
+void UpdateSha256FromV8String(v8::Isolate* isolate,
+                              v8::Local<v8::String> str,
+                              crypto::SecureHash* hasher) {
+  if (TryUpdateSha256FromAsciiOneByte(isolate, str, hasher))
+    return;
+  if (str->ContainsOnlyOneByte()) {
+    UpdateSha256FromLatin1AsUtf8(isolate, str, hasher);
+    return;
+  }
+  UpdateSha256FromUtf16ViaChunkedWriteUtf8(isolate, str, hasher);
+}
+
+}  // namespace
+
 static void SHA256DigestHex(const v8::FunctionCallbackInfo<v8::Value>& args) {
   CHECK(args.Length() == 1 && args[0]->IsString() &&
       "must be called with a single string");
   v8::Isolate* isolate = args.GetIsolate();
-  v8::String::Utf8Value content(isolate, args[0]);
-
-  std::unique_ptr<crypto::SecureHash> hasher =
-    crypto::SecureHash::Create(crypto::SecureHash::SHA256);
-  hasher->Update(*content, content.length());
-  uint8_t digest[crypto::kSHA256Length];
-  hasher->Finish(digest, crypto::kSHA256Length);
   char* digestHex = new char[65];
-  for (int i = 0; i < 32; i++) {
-    sprintf(digestHex + i * 2, "%02x", digest[i]);
+
+  if (!recordreplay::IsReplaying()) {
+    std::unique_ptr<crypto::SecureHash> hasher =
+        crypto::SecureHash::Create(crypto::SecureHash::SHA256);
+    UpdateSha256FromV8String(isolate, args[0].As<v8::String>(), hasher.get());
+    uint8_t digest[crypto::kSHA256Length];
+    hasher->Finish(digest, crypto::kSHA256Length);
+    for (int i = 0; i < 32; i++) {
+      sprintf(digestHex + i * 2, "%02x", digest[i]);
+    }
   }
 
   // The content being hashed can vary when replaying if source contents have been

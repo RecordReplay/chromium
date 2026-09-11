@@ -62,6 +62,8 @@ addNewScriptHandler(async (scriptId, sourceURL, relativeSourceMapURL) => {
   if (!urls)
     return;
 
+  await Promise.resolve();
+
   const scriptSource = getScriptSource(scriptId);
   const generatedScriptHash = sha256DigestHex(scriptSource);
 
